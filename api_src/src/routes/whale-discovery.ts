@@ -102,39 +102,105 @@ function getCachedPeriodData(address: string, period: '24h' | '7d' | '30d' | 'al
 }
 
 // 更新缓存数据
+// 更新缓存数据 - 只调用一次 API，本地聚合所有时间段
 async function updateWhaleCache(address: string): Promise<void> {
     if (!sdk) {
         sdk = new PolymarketSDK();
     }
 
-    const periods = ['24h', '7d', '30d', 'all'] as const;
-    const periodDaysMap = { '24h': 1, '7d': 7, '30d': 30, 'all': 0 };
+    try {
+        // 只调用一次 Data API，获取所有活动记录
+        const allActivities = await sdk.dataApi.getAllActivity(address, 10000);
 
-    const periodsData: any = {};
+        console.log(`[WhaleCache] Fetched ${allActivities.length} activities for ${address}`);
 
-    for (const period of periods) {
+        // 获取当前持仓（用于未实现盈亏）
+        let positions: any[] = [];
         try {
-            const stats = await sdk.wallets.getWalletProfileForPeriod(address, periodDaysMap[period]);
-            periodsData[period] = {
-                pnl: stats.pnl,
-                volume: stats.volume,
-                tradeCount: stats.tradeCount,
-                winRate: stats.winRate,
-                smartScore: stats.smartScore,
-            };
-        } catch (error) {
-            console.error(`[WhaleCache] Failed to fetch ${period} data for ${address}:`, error);
-            periodsData[period] = { pnl: 0, volume: 0, tradeCount: 0, winRate: 0.5, smartScore: 50 };
+            positions = await sdk.dataApi.getPositions(address);
+        } catch {
+            console.warn(`[WhaleCache] Failed to get positions for ${address}`);
         }
+
+        const now = Date.now();
+        const periodConfigs = [
+            { period: '24h' as const, days: 1 },
+            { period: '7d' as const, days: 7 },
+            { period: '30d' as const, days: 30 },
+            { period: 'all' as const, days: 0 },
+        ];
+
+        const periodsData: any = {};
+
+        // 对每个时间段进行聚合计算
+        for (const { period, days } of periodConfigs) {
+            const sinceTimestamp = days > 0 ? now - days * 24 * 60 * 60 * 1000 : 0;
+            const filtered = allActivities.filter((a: any) => a.timestamp >= sinceTimestamp);
+
+            // 分类
+            const trades = filtered.filter((a: any) => a.type === 'TRADE');
+            const redemptions = filtered.filter((a: any) => a.type === 'REDEEM');
+            const buys = trades.filter((a: any) => a.side === 'BUY');
+            const sells = trades.filter((a: any) => a.side === 'SELL');
+
+            // 计算交易量
+            const buyVolume = buys.reduce((sum: number, t: any) => sum + (t.usdcSize || t.size * t.price), 0);
+            const sellVolume = sells.reduce((sum: number, t: any) => sum + (t.usdcSize || t.size * t.price), 0);
+            const volume = buyVolume + sellVolume;
+
+            // 计算 PnL
+            const redemptionValue = redemptions.reduce((sum: number, r: any) => sum + (r.size || 0), 0);
+            const realizedPnl = sellVolume + redemptionValue - buyVolume;
+            const unrealizedPnl = positions.reduce((sum: number, p: any) => sum + (p.cashPnl || 0), 0);
+            const pnl = realizedPnl + unrealizedPnl;
+
+            // 计算胜率
+            let winCount = 0;
+            for (const sell of sells) {
+                if (sell.price > 0.5) winCount++;
+            }
+            winCount += redemptions.filter((r: any) => (r.size || 0) > 0).length;
+            const totalClosed = sells.length + redemptions.length;
+            const winRate = totalClosed > 0 ? winCount / totalClosed : 0.5;
+
+            // 计算评分
+            const roi = volume > 0 ? (pnl / volume) * 100 : 0;
+            const activityScore = Math.min(20, trades.length / 10);
+            const roiScore = Math.min(30, Math.max(-30, roi * 3));
+            const smartScore = Math.round(Math.max(0, Math.min(100, 50 + roiScore + activityScore)));
+
+            periodsData[period] = {
+                pnl,
+                volume,
+                tradeCount: trades.length,
+                winRate: Math.max(0, Math.min(1, winRate)),
+                smartScore,
+            };
+        }
+
+        whaleCacheData[address] = {
+            updatedAt: Date.now(),
+            periods: periodsData,
+        };
+
+        saveWhaleCache();
+        console.log(`[WhaleCache] Updated cache for ${address} (all periods calculated from single API call)`);
+
+    } catch (error) {
+        console.error(`[WhaleCache] Failed to update cache for ${address}:`, error);
+        // 设置默认值
+        const defaultData = { pnl: 0, volume: 0, tradeCount: 0, winRate: 0.5, smartScore: 50 };
+        whaleCacheData[address] = {
+            updatedAt: Date.now(),
+            periods: {
+                '24h': { ...defaultData },
+                '7d': { ...defaultData },
+                '30d': { ...defaultData },
+                'all': { ...defaultData },
+            },
+        };
+        saveWhaleCache();
     }
-
-    whaleCacheData[address] = {
-        updatedAt: Date.now(),
-        periods: periodsData,
-    };
-
-    saveWhaleCache();
-    console.log(`[WhaleCache] Updated cache for ${address}`);
 }
 
 // 启动时加载缓存
