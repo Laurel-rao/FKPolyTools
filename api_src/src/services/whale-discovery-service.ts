@@ -218,6 +218,8 @@ export class WhaleDiscoveryService extends EventEmitter {
 
     // 钱包分析函数（外部注入）
     private analyzeWallet?: (address: string) => Promise<WalletProfile | null>;
+    // 鲸鱼确认回调（用于缓存预热）
+    private whaleConfirmedCallback?: (address: string) => Promise<void>;
 
     constructor(config: WhaleDiscoveryConfig) {
         super();
@@ -247,6 +249,13 @@ export class WhaleDiscoveryService extends EventEmitter {
      */
     setWalletAnalyzer(analyzer: (address: string) => Promise<WalletProfile | null>): void {
         this.analyzeWallet = analyzer;
+    }
+
+    /**
+     * 设置鲸鱼确认回调（用于缓存预热）
+     */
+    setWhaleConfirmedCallback(callback: (address: string) => Promise<void>): void {
+        this.whaleConfirmedCallback = callback;
     }
 
     /**
@@ -527,6 +536,15 @@ export class WhaleDiscoveryService extends EventEmitter {
 
                     this.discoveredWhales.set(address, whale);
                     this.emit('newWhale', whale);
+
+                    // 调用鲸鱼确认回调（用于缓存预热）
+                    if (this.whaleConfirmedCallback) {
+                        try {
+                            await this.whaleConfirmedCallback(address);
+                        } catch (err) {
+                            console.error(`[WhaleDiscovery] Cache callback failed for ${address}:`, err);
+                        }
+                    }
 
                     // 缓存为鲸鱼
                     this.analyzedAddresses.set(address, {
