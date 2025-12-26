@@ -97,5 +97,38 @@
         "smartScore": 40
       }
     }
+  },
+  "0x06dcaa14f57d8a0573f5dc5940565e6de667af59": {
+    "updatedAt": 1766733906064,
+    "periods": {
+      "24h": {
+        "pnl": 14530.704962000007,
+        "volume": 9711.020098,
+        "tradeCount": 36,
+        "winRate": 0,
+        "smartScore": 84
+      },
+      "7d": {
+        "pnl": 112728.95497499984,
+        "volume": 322034.053635,
+        "tradeCount": 761,
+        "winRate": 0.6940639269406392,
+        "smartScore": 100
+      },
+      "30d": {
+        "pnl": -255080.28674900986,
+        "volume": 1085837.0709129933,
+        "tradeCount": 9891,
+        "winRate": 0.4218566392479436,
+        "smartScore": 40
+      },
+      "all": {
+        "pnl": -255080.28674900986,
+        "volume": 1085837.0709129933,
+        "tradeCount": 9891,
+        "winRate": 0.4218566392479436,
+        "smartScore": 40
+      }
+    }
   }
 }

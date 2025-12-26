@@ -413,7 +413,26 @@ export async function whaleDiscoveryRoutes(fastify: FastifyInstance): Promise<vo
         const sort = (request.query.sort || 'pnl') as 'pnl' | 'volume' | 'winRate';
         const limit = request.query.limit || 50;
 
-        return whaleService.getWhales(sort, limit).map((w) => ({
+        const whales = whaleService.getWhales(sort, limit);
+
+        // 自动预热缓存：检查哪些地址没有缓存，后台异步更新
+        const uncachedAddresses = whales.filter(w => !isCacheValid(w.address)).map(w => w.address);
+        if (uncachedAddresses.length > 0) {
+            console.log(`[WhaleCache] Auto-caching ${uncachedAddresses.length} uncached whales...`);
+            // 后台异步更新，不阻塞响应
+            (async () => {
+                for (const addr of uncachedAddresses) {
+                    try {
+                        await updateWhaleCache(addr);
+                    } catch (err) {
+                        console.error(`[WhaleCache] Failed to auto-cache ${addr}:`, err);
+                    }
+                }
+                console.log(`[WhaleCache] Auto-cache completed for ${uncachedAddresses.length} whales`);
+            })();
+        }
+
+        return whales.map((w) => ({
             ...w,
             discoveredAt: w.discoveredAt.toISOString(),
         }));
