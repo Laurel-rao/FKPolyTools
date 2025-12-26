@@ -288,6 +288,37 @@ function WhaleDiscovery() {
             width: 100,
         },
         {
+            title: '交易次数',
+            key: 'tradeCount',
+            render: (_: any, record: WhaleCandidate) => {
+                const pd = periodData[record.address];
+                const tradeCount = timePeriod !== 'all' && pd ? pd.tradeCount : record.profile?.totalTrades;
+                const showLoading = timePeriod !== 'all' && loadingPeriod && !pd;
+                if (showLoading) return <Spin size="small" />;
+                return tradeCount !== undefined ? tradeCount : 'N/A';
+            },
+            width: 80,
+        },
+        {
+            title: 'ROI',
+            key: 'roi',
+            render: (_: any, record: WhaleCandidate) => {
+                const pd = periodData[record.address];
+                const pnl = timePeriod !== 'all' && pd ? pd.pnl : record.profile?.pnl;
+                const volume = timePeriod !== 'all' && pd ? pd.volume : record.profile?.totalVolume;
+                const showLoading = timePeriod !== 'all' && loadingPeriod && !pd;
+                if (showLoading) return <Spin size="small" />;
+                if (pnl === undefined || volume === undefined || volume === 0) return 'N/A';
+                const roi = (pnl / volume) * 100;
+                return (
+                    <span style={{ color: roi >= 0 ? '#52c41a' : '#ff4d4f' }}>
+                        {roi >= 0 ? '+' : ''}{roi.toFixed(1)}%
+                    </span>
+                );
+            },
+            width: 80,
+        },
+        {
             title: '分数',
             key: 'score',
             render: (_: any, record: WhaleCandidate) => {
