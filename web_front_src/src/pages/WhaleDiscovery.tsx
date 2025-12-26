@@ -100,15 +100,17 @@ function WhaleDiscovery() {
         return () => clearInterval(interval);
     }, [loadStatus, loadWhales]);
 
-    // 当时间段或鲸鱼列表变化时加载时间段数据
+    // 当时间段变化时加载时间段数据（不依赖 whales 变化，避免自动刷新）
     useEffect(() => {
-        if (whales.length > 0 && timePeriod !== 'all') {
+        if (timePeriod !== 'all' && whales.length > 0) {
             const addresses = whales.map(w => w.address);
             loadPeriodData(timePeriod, addresses);
         } else {
             setPeriodData({});
         }
-    }, [timePeriod, whales, loadPeriodData]);
+        // 只在 timePeriod 变化时触发，不监听 whales 变化
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [timePeriod]);
 
     const handleStart = async () => {
         if (!infuraKey) {
