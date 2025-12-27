@@ -8,6 +8,7 @@ import { WhaleDiscoveryService, WhaleDiscoveryConfig } from '../services/whale-d
 import { PolymarketSDK } from '../../../dist/index.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { initDb, getDb, saveDb } from '../db/index.js';
 
 // 配置文件路径
 const CONFIG_FILE_PATH = path.resolve(process.cwd(), '..', 'config.json');
@@ -40,13 +41,26 @@ function saveConfigFile(config: any): void {
 
 // ===== 鲸鱼数据缓存 =====
 
-const WHALE_CACHE_FILE = path.resolve(process.cwd(), '..', 'whale_cache.json');
+// 数据存储目录
+const DATA_DIR = path.resolve(process.cwd(), '..', 'datas');
+const WHALE_DATA_DIR = path.resolve(DATA_DIR, 'whales');
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 小时
+
+// 确保目录存在
+function ensureDataDirs(): void {
+    if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(WHALE_DATA_DIR)) {
+        fs.mkdirSync(WHALE_DATA_DIR, { recursive: true });
+    }
+}
 
 interface WhalePeriodData {
     pnl: number;
     volume: number;
     tradeCount: number;
+    tradeCountDisplay?: string; // 如 "> 5000" 表示数据被截断
     winRate: number;
     smartScore: number;
 }
@@ -64,52 +78,82 @@ interface WhaleCache {
 }
 
 // ===== 监控名单 =====
-const WATCHED_FILE = path.resolve(process.cwd(), '..', 'watched_addresses.json');
 let watchedAddresses = new Set<string>();
 
 function loadWatchedAddresses(): void {
     try {
-        if (fs.existsSync(WATCHED_FILE)) {
-            const data = fs.readFileSync(WATCHED_FILE, 'utf-8');
-            const list = JSON.parse(data);
-            watchedAddresses = new Set(list.map((a: string) => a.toLowerCase()));
+        const db = getDb();
+        const rows = db.exec('SELECT address FROM watched');
+        if (rows.length > 0 && rows[0].values) {
+            watchedAddresses = new Set(rows[0].values.map((r: any[]) => String(r[0]).toLowerCase()));
         }
+        console.log(`[Watched] Loaded ${watchedAddresses.size} watched addresses from DB`);
     } catch (error) {
         console.error('[Watched] Failed to load watched addresses:', error);
     }
 }
 
 function saveWatchedAddresses(): void {
-    try {
-        fs.writeFileSync(WATCHED_FILE, JSON.stringify(Array.from(watchedAddresses), null, 2), 'utf-8');
-    } catch (error) {
-        console.error('[Watched] Failed to save watched addresses:', error);
-    }
+    // DB changes are saved via saveDb() after each operation
 }
 
 let whaleCacheData: WhaleCache = {};
 
-// 读取缓存文件
+// 读取单个地址的缓存
+function loadWhaleData(address: string): WhaleCache[string] | null {
+    try {
+        const db = getDb();
+        const rows = db.exec('SELECT data FROM whales WHERE address = ?', [address.toLowerCase()]);
+        if (rows.length > 0 && rows[0].values && rows[0].values.length > 0) {
+            return JSON.parse(String(rows[0].values[0][0]));
+        }
+    } catch (error) {
+        console.error(`[WhaleCache] Failed to load data for ${address}:`, error);
+    }
+    return null;
+}
+
+// 保存单个地址的缓存
+function saveWhaleData(address: string, data: WhaleCache[string]): void {
+    try {
+        const db = getDb();
+        const json = JSON.stringify(data);
+        const now = Date.now();
+        db.run('INSERT OR REPLACE INTO whales (address, data, last_updated) VALUES (?, ?, ?)',
+            [address.toLowerCase(), json, now]);
+        saveDb(); // Persist to file
+    } catch (error) {
+        console.error(`[WhaleCache] Failed to save data for ${address}:`, error);
+    }
+}
+
+// 读取所有缓存数据到内存
 function loadWhaleCache(): void {
     try {
-        if (fs.existsSync(WHALE_CACHE_FILE)) {
-            const data = fs.readFileSync(WHALE_CACHE_FILE, 'utf-8');
-            whaleCacheData = JSON.parse(data);
-            //console.log(`[WhaleCache] Loaded ${Object.keys(whaleCacheData).length} whales from cache`);
+        whaleCacheData = {};
+        const db = getDb();
+        const rows = db.exec('SELECT address, data FROM whales');
+
+        if (rows.length > 0 && rows[0].values) {
+            for (const row of rows[0].values) {
+                try {
+                    const address = String(row[0]);
+                    whaleCacheData[address] = JSON.parse(String(row[1]));
+                } catch (err) {
+                    console.error(`[WhaleCache] Failed to parse data:`, err);
+                }
+            }
         }
+        console.log(`[WhaleCache] Loaded ${Object.keys(whaleCacheData).length} whales from DB`);
     } catch (error) {
         console.error('[WhaleCache] Failed to load cache:', error);
         whaleCacheData = {};
     }
 }
 
-// 保存缓存文件
+// 保存缓存（现在只保存单个地址）
 function saveWhaleCache(): void {
-    try {
-        fs.writeFileSync(WHALE_CACHE_FILE, JSON.stringify(whaleCacheData, null, 2), 'utf-8');
-    } catch (error) {
-        console.error('[WhaleCache] Failed to save cache:', error);
-    }
+    // 此函数现在仅用于兼容
 }
 
 // 检查缓存是否过期
@@ -183,19 +227,88 @@ async function performWhaleCacheUpdate(address: string, force = false): Promise<
     }
 
     try {
-        // 方案 B 优化：分别抓取成交记录和结算记录，提升时间跨度
-        // 成交记录 (TRADE) 是计算量的核心，抓取 10,000 条
-        const trades = await sdk.dataApi.getAllActivity(normalizedAddress, 10000, 'TRADE');
-        // 结算记录 (REDEEM) 是计算盈利的核心，抓取 2,000 条
-        const redemptions = await sdk.dataApi.getAllActivity(normalizedAddress, 2000, 'REDEEM');
+        // 30天前的时间戳
+        const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
 
-        // 数据完整性核验：如果完全拿不到记录（且已知是鲸鱼），往往是接口超限或异常，此时不应由于空结果而清空缓存
-        if (trades.length === 0 && redemptions.length === 0) {
+        // 分页拉取，直到：1) 达到最大上限 2) 所有数据拉取完毕 3) 最早记录超过30天前
+        const PAGE_SIZE = 500; // 每页拉取数量
+        const MAX_RECORDS = 100000; // 最大拉取上限
+        let allTrades: any[] = [];
+        let allRedemptions: any[] = [];
+        let tradesTruncated = false; // 是否因30天/上限限制而截断
+        let redemptionsTruncated = false;
+
+        // 拉取交易记录 (TRADE)
+        console.log(`[WhaleCache] Fetching trades for ${normalizedAddress}...`);
+        let offset = 0;
+        while (true) {
+            const batch = await sdk.dataApi.getActivity(normalizedAddress, { limit: PAGE_SIZE, offset, type: 'TRADE' });
+            if (!batch || batch.length === 0) break;
+
+            allTrades.push(...batch);
+
+            // 检查是否已经拉取到30天之前的数据
+            const oldestInBatch = batch[batch.length - 1];
+            if (oldestInBatch && oldestInBatch.timestamp < thirtyDaysAgo) {
+                tradesTruncated = true;
+                console.log(`[WhaleCache] Trades reached 30-day limit at ${allTrades.length} records`);
+                break;
+            }
+
+            // 如果返回的数据少于请求的数量，说明已经拉取完毕
+            if (batch.length < PAGE_SIZE) break;
+
+            // 达到最大上限
+            if (allTrades.length >= MAX_RECORDS) {
+                tradesTruncated = true;
+                console.log(`[WhaleCache] Trades reached max limit at ${allTrades.length} records`);
+                break;
+            }
+
+            offset += PAGE_SIZE;
+
+            // 每1000条显示进度
+            if (allTrades.length % 10000 === 0) {
+                console.log(`[WhaleCache] ... fetched ${allTrades.length} trades so far`);
+            }
+
+            // 防止请求过快
+            await new Promise(r => setTimeout(r, 200));
+        }
+        console.log(`[WhaleCache] Fetched ${allTrades.length} trades (truncated: ${tradesTruncated})`);
+
+        // 记录 trades 的最早时间戳，作为 redemptions 的截止点
+        const tradesOldestTimestamp = allTrades.length > 0
+            ? allTrades[allTrades.length - 1].timestamp
+            : thirtyDaysAgo;
+
+        // 拉取结算记录 (REDEEM) - 只回溯到与 trades 相同的日期
+        offset = 0;
+        while (true) {
+            const batch = await sdk.dataApi.getActivity(normalizedAddress, { limit: PAGE_SIZE, offset, type: 'REDEEM' });
+            if (!batch || batch.length === 0) break;
+
+            allRedemptions.push(...batch);
+
+            const oldestInBatch = batch[batch.length - 1];
+            // 使用 trades 的最早时间戳作为截止点
+            if (oldestInBatch && oldestInBatch.timestamp < tradesOldestTimestamp) {
+                redemptionsTruncated = tradesTruncated; // 跟随 trades 的截断状态
+                break;
+            }
+
+            if (batch.length < PAGE_SIZE) break;
+
+            offset += PAGE_SIZE;
+            await new Promise(r => setTimeout(r, 200));
+        }
+        console.log(`[WhaleCache] Fetched ${allRedemptions.length} redemptions`);
+
+        // 数据完整性核验
+        if (allTrades.length === 0 && allRedemptions.length === 0) {
             console.warn(`[WhaleCache] No data found for ${normalizedAddress}, skipping cache update to prevent pollution.`);
             return;
         }
-
-        const allActivities = [...trades, ...redemptions].sort((a, b) => b.timestamp - a.timestamp);
 
         // 获取当前持仓（用于未实现盈亏）
         let positions: any[] = [];
@@ -207,27 +320,15 @@ async function performWhaleCacheUpdate(address: string, force = false): Promise<
 
         const periods = ['24h', '7d', '30d', 'all'];
         const periodsData: any = {};
+        const isTruncated = tradesTruncated || redemptionsTruncated;
 
         // 对每个时间段进行聚合计算
         for (const period of periods) {
             const periodDays = period === '24h' ? 1 : period === '7d' ? 7 : period === '30d' ? 30 : 0;
             const sinceTs = periodDays > 0 ? Date.now() - (periodDays * 24 * 60 * 60 * 1000) : 0;
 
-            const filteredTrades = trades.filter(t => t.timestamp >= sinceTs);
-            const filteredRedemptions = redemptions.filter(r => r.timestamp >= sinceTs);
-
-            // 严谨校验：如果数据量触顶且时间跨度不足，说明窗口不完整，置零 24h/7h/30h
-            const earliestTs = trades.length > 0 ? trades[trades.length - 1].timestamp : Date.now();
-            if (periodDays > 0 && trades.length >= 10000 && earliestTs > sinceTs) {
-                periodsData[period] = {
-                    pnl: 0,
-                    volume: 0,
-                    tradeCount: 0,
-                    winRate: 0.5,
-                    smartScore: 50,
-                };
-                continue;
-            }
+            const filteredTrades = allTrades.filter(t => t.timestamp >= sinceTs);
+            const filteredRedemptions = allRedemptions.filter(r => r.timestamp >= sinceTs);
 
             // 计算该时间段的 PnL 和交易量
             const buyVolume = filteredTrades.filter(t => t.side === 'BUY').reduce((sum, t) => sum + (t.usdcSize || t.size * t.price), 0);
@@ -281,17 +382,20 @@ async function performWhaleCacheUpdate(address: string, force = false): Promise<
                 pnl,
                 volume,
                 tradeCount: filteredTrades.length,
+                // 如果数据被截断（因30天限制或5W上限），显示 "> XXXX"
+                tradeCountDisplay: isTruncated ? `> ${filteredTrades.length}` : undefined,
                 winRate: Math.max(0, Math.min(1, winRate)),
                 smartScore,
             };
         }
 
-        whaleCacheData[normalizedAddress] = {
+        const whaleData = {
             updatedAt: Date.now(),
             periods: periodsData,
         };
 
-        saveWhaleCache();
+        whaleCacheData[normalizedAddress] = whaleData;
+        saveWhaleData(normalizedAddress, whaleData);
 
     } catch (error) {
         console.error(`[WhaleCache] Critial scan error for ${normalizedAddress}:`, error);
@@ -299,13 +403,25 @@ async function performWhaleCacheUpdate(address: string, force = false): Promise<
     }
 }
 
-// 启动时加载缓存
-loadWhaleCache();
-loadWatchedAddresses();
+// 批量触发缓存更新（供其他模块调用，如 leaderboard）
+export async function triggerWhaleCacheUpdate(addresses: string[]): Promise<void> {
+    for (const address of addresses) {
+        await updateWhaleCache(address, false);
+    }
+}
+
+// 启动时加载缓存 - Moved to route logic (requires async DB init)
+// loadWhaleCache();
+// loadWatchedAddresses();
 
 // ===== Routes =====
 
 export async function whaleDiscoveryRoutes(fastify: FastifyInstance): Promise<void> {
+
+    // Initialize Database (sql.js requires async init)
+    await initDb();
+    loadWhaleCache();
+    loadWatchedAddresses();
 
     // POST /api/whale/start - 启动服务
     fastify.post('/start', {
@@ -844,45 +960,22 @@ export async function whaleDiscoveryRoutes(fastify: FastifyInstance): Promise<vo
                 winRate: cached.winRate,
                 smartScore: cached.smartScore,
                 fromCache: true,
+                status: 'success'
             };
         }
 
-        // 2. 缓存不存在或过期，实时请求并更新缓存
-        if (!sdk) {
-            sdk = new PolymarketSDK();
-        }
+        // 2. 缓存不存在或过期，立即触发后台更新任务并返回 PENDING
+        // 不再同步调用 sdk.wallets.getWalletProfileForPeriod，避免阻塞响应
+        updateWhaleCache(address, false).catch(err =>
+            console.error('[WhaleCache] Async update failed for', address, err)
+        );
 
-        const periodDays = period === '24h' ? 1 : period === '7d' ? 7 : period === '30d' ? 30 : 0;
-
-        try {
-            const stats = await sdk.wallets.getWalletProfileForPeriod(address, periodDays);
-
-            // 更新缓存（异步，不阻塞响应）
-            updateWhaleCache(address).catch(err => console.error('[WhaleCache] Async update failed:', err));
-
-            return {
-                address,
-                period,
-                pnl: stats.pnl,
-                volume: stats.volume,
-                tradeCount: stats.tradeCount,
-                winRate: stats.winRate,
-                smartScore: stats.smartScore,
-                fromCache: false,
-            };
-        } catch (error) {
-            console.error(`[WhaleProfile] Error fetching profile for ${address}:`, error);
-            return {
-                address,
-                period,
-                pnl: 0,
-                volume: 0,
-                tradeCount: 0,
-                winRate: 0.5,
-                smartScore: 50,
-                error: 'Data unavailable',
-            };
-        }
+        return {
+            address,
+            period,
+            status: 'pending',
+            message: 'Background scan started'
+        };
     });
 
     // GET /api/whale/watched - 获取监控名单
@@ -892,7 +985,21 @@ export async function whaleDiscoveryRoutes(fastify: FastifyInstance): Promise<vo
             summary: '获取监控名单',
         },
     }, async () => {
-        return Array.from(watchedAddresses);
+        const db = getDb();
+        try {
+            const results = db.exec("SELECT address, label FROM watched ORDER BY added_at DESC");
+            if (results.length > 0 && results[0].values) {
+                return results[0].values.map((row: any[]) => ({
+                    address: row[0],
+                    label: row[1] || ''
+                }));
+            }
+            return [];
+        } catch (error) {
+            console.error('Error fetching watched list:', error);
+            // Fallback to memory set if DB fails
+            return Array.from(watchedAddresses).map(addr => ({ address: addr, label: '' }));
+        }
     });
 
     // POST /api/whale/watch - 切换监控状态
@@ -906,21 +1013,47 @@ export async function whaleDiscoveryRoutes(fastify: FastifyInstance): Promise<vo
                 properties: {
                     address: { type: 'string' },
                     watched: { type: 'boolean' },
+                    label: { type: 'string', maxLength: 6, description: '自定义标签（最多6个字符）' },
                 },
             },
         },
-    }, async (request: FastifyRequest<{ Body: { address: string; watched: boolean } }>) => {
-        const { address, watched } = request.body;
+    }, async (request: FastifyRequest<{ Body: { address: string; watched: boolean; label?: string } }>) => {
+        const { address, watched, label } = request.body;
         const normalized = address.toLowerCase();
+        const trimmedLabel = label ? label.slice(0, 6) : null; // 确保最多6个字符
 
+        const db = getDb();
         if (watched) {
             watchedAddresses.add(normalized);
+            db.run('INSERT OR REPLACE INTO watched (address, added_at, label) VALUES (?, ?, ?)',
+                [normalized, Date.now(), trimmedLabel]);
         } else {
             watchedAddresses.delete(normalized);
+            db.run('DELETE FROM watched WHERE address = ?', [normalized]);
+        }
+        saveDb(); // Persist changes
+
+        return { status: 'success', address: normalized, watched, label: trimmedLabel };
+    });
+
+    // DELETE /api/whale/cache - 清除所有缓存数据
+    fastify.delete('/cache', {
+        schema: {
+            tags: ['鲸鱼发现'],
+            summary: '清除所有鲸鱼缓存数据',
+        },
+    }, async () => {
+        const db = getDb();
+        db.run('DELETE FROM whales');
+        saveDb();
+
+        // 清空内存缓存
+        for (const key of Object.keys(whaleCacheData)) {
+            delete whaleCacheData[key];
         }
 
-        saveWatchedAddresses();
-        return { status: 'success', address: normalized, watched };
+        console.log('[WhaleCache] All cache cleared');
+        return { status: 'success', message: 'All whale cache cleared' };
     });
 }
 

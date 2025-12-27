@@ -68,7 +68,7 @@ export const arbitrageRoutes: FastifyPluginAsync = async (fastify) => {
                         });
                     }
                 } catch (error) {
-                    // 跳过无法获取订单簿的市场
+                    // Skip markets where orderbook cannot be fetched
                 }
             }
 

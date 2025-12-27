@@ -4,6 +4,7 @@
 
 import { FastifyPluginAsync } from 'fastify';
 import { PolymarketSDK } from '../../../dist/index.js';
+import { triggerWhaleCacheUpdate } from './whale-discovery.js';
 
 const sdk = new PolymarketSDK();
 
@@ -16,13 +17,21 @@ export const walletRoutes: FastifyPluginAsync = async (fastify) => {
             querystring: {
                 type: 'object',
                 properties: {
-                    limit: { type: 'number', default: 10 },
+                    limit: { type: 'number', default: 200, description: '获取条目数量，最大500' },
                 },
             },
         },
         handler: async (request, reply) => {
-            const { limit = 10 } = request.query as { limit?: number };
-            const traders = await sdk.wallets.getTopTraders(limit);
+            const { limit = 200 } = request.query as { limit?: number };
+            // 使用分页 API 获取更多数据（每页50条，自动翻页）
+            const traders = await sdk.dataApi.getAllLeaderboard(Math.min(limit, 500));
+
+            // 异步将排行榜地址加入缓存队列（不阻塞响应）
+            const addresses = traders.map(t => t.address);
+            triggerWhaleCacheUpdate(addresses).catch(err =>
+                console.error('[Leaderboard] Failed to trigger cache update:', err)
+            );
+
             return traders;
         },
     });

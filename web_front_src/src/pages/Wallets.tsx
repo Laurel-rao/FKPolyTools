@@ -24,7 +24,7 @@ function Wallets() {
     const loadData = async () => {
         try {
             setLoading(true);
-            const res = await walletApi.getLeaderboard(20);
+            const res = await walletApi.getLeaderboard(500);
             setTraders(res.data);
         } catch (err) {
             setError('无法加载排行榜数据');

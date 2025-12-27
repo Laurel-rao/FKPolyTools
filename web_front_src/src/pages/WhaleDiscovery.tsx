@@ -106,8 +106,6 @@ function WhaleDiscovery() {
         if (addresses.length === 0) return;
 
         setLoadingPeriod(true);
-        // 不再清空旧数据，保持界面平滑
-        // setPeriodData({});
 
         try {
             // 1. 先尝试批量获取缓存数据
@@ -134,7 +132,10 @@ function WhaleDiscovery() {
                 for (const address of missingAddresses) {
                     try {
                         const res = await whaleApi.getProfile(address, period);
-                        setPeriodData(prev => ({ ...prev, [address]: res.data }));
+                        // 如果返回 pending，不更新数据，让列表保持加载状态
+                        if (res.data.status === 'success') {
+                            setPeriodData(prev => ({ ...prev, [address]: res.data }));
+                        }
                     } catch {
                         setPeriodData(prev => ({
                             ...prev,
@@ -148,7 +149,9 @@ function WhaleDiscovery() {
             for (const address of addresses) {
                 try {
                     const res = await whaleApi.getProfile(address, period);
-                    setPeriodData(prev => ({ ...prev, [address]: res.data }));
+                    if (res.data.status === 'success') {
+                        setPeriodData(prev => ({ ...prev, [address]: res.data }));
+                    }
                 } catch {
                     setPeriodData(prev => ({
                         ...prev,
@@ -178,11 +181,30 @@ function WhaleDiscovery() {
     // 当时间段变化时加载时间段数据
     useEffect(() => {
         if (whales.length > 0) {
+            // 切换时间段时清空旧数据，触发 Spin
+            setPeriodData({});
             const addresses = whales.map(w => w.address);
             loadPeriodData(timePeriod, addresses);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [timePeriod, whales.length]);
+
+    // 轮询机制：对仍在 loading (没有 periodData) 的地址进行重试
+    useEffect(() => {
+        if (whales.length === 0) return;
+
+        const interval = setInterval(() => {
+            const missingAddresses = whales
+                .map(w => w.address)
+                .filter(addr => !periodData[addr]);
+
+            if (missingAddresses.length > 0) {
+                loadPeriodData(timePeriod, missingAddresses);
+            }
+        }, 5000);
+
+        return () => clearInterval(interval);
+    }, [whales, periodData, timePeriod, loadPeriodData]);
 
     const handleStart = async () => {
         if (!infuraKey) {
@@ -512,7 +534,7 @@ function WhaleDiscovery() {
     return (
         <div>
             <Title level={3} style={{ color: '#fff', marginBottom: 24 }}>
-                🐋 鲸鱼发现
+                🐋 动态鲸鱼发现
             </Title>
 
             {/* 控制面板 */}

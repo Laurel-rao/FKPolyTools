@@ -27,7 +27,7 @@ function Sidebar() {
         {
             key: '/arbitrage',
             icon: <SwapOutlined />,
-            label: '套利',
+            label: 'YES+NO<1',
         },
         {
             key: '/wallets',
@@ -37,7 +37,17 @@ function Sidebar() {
         {
             key: '/whale',
             icon: <WalletOutlined />,
-            label: '🐋 鲸鱼发现',
+            label: '🐋 动态鲸鱼发现',
+        },
+        {
+            key: '/top-whale',
+            icon: <WalletOutlined />,
+            label: '🏆 Top鲸鱼发现',
+        },
+        {
+            key: '/watched-whales',
+            icon: <WalletOutlined />,
+            label: '👀 已跟踪鲸鱼',
         },
     ];
 

@@ -1,6 +1,6 @@
 // Web 前端模块版本号
 // 每次 web_front_src 代码变更时更新此版本
-export const WEB_VERSION = '1.0.1';
+export const WEB_VERSION = '1.0.2';
 
 // 更新日志
 // 1.0.1 - 批量缓存加载，版本号显示，刷新缓存按钮

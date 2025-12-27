@@ -23,7 +23,7 @@ export const arbitrageApi = {
 
 // 钱包 API
 export const walletApi = {
-    getLeaderboard: (limit = 10) => api.get(`/wallets/leaderboard?limit=${limit}`),
+    getLeaderboard: (limit = 500) => api.get(`/wallets/leaderboard?limit=${limit}`),
     getProfile: (address: string) => api.get(`/wallets/${address}/profile`),
     getPositions: (address: string) => api.get(`/wallets/${address}/positions`),
     getActivity: (address: string, limit = 50) => api.get(`/wallets/${address}/activity?limit=${limit}`),
@@ -47,7 +47,7 @@ export const whaleApi = {
     getCacheBulk: (addresses: string[]) => api.get(`/whale/cache/bulk?addresses=${addresses.join(',')}`),
     // 监控名单
     getWatched: () => api.get('/whale/watched'),
-    toggleWatch: (address: string, watched: boolean) => api.post('/whale/watch', { address, watched }),
+    toggleWatch: (address: string, watched: boolean, label?: string) => api.post('/whale/watch', { address, watched, label }),
 };
 
 // 版本 API

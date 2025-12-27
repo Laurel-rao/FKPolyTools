@@ -2,7 +2,7 @@
     "INFURA_API_KEY": "",
     "API_BASE_URL": "http://localhost:3000",
     "whaleDiscovery": {
-        "minTradeUsdcValue": 300,
+        "minTradeUsdcValue": 500,
         "minWinRate": 0.55,
         "minPnl": 100,
         "minVolume": 500,

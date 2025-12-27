@@ -37,7 +37,8 @@ function Arbitrage() {
         try {
             setLoading(true);
             setError(null);
-            const res = await arbitrageApi.scan(5000, 50, 0.001);
+            // Adjusted params: minVolume 1000, minProfit 0.2%
+            const res = await arbitrageApi.scan(1000, 50, 0.002);
             setOpportunities(res.data.opportunities || []);
             setScannedAt(res.data.scannedAt);
         } catch (err) {
@@ -112,7 +113,7 @@ function Arbitrage() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
                 <Title level={3} style={{ color: '#fff', margin: 0 }}>
                     <ThunderboltOutlined style={{ marginRight: 8 }} />
-                    套利扫描
+                    YES+NO &lt; 1
                 </Title>
                 <Button
                     type="primary"

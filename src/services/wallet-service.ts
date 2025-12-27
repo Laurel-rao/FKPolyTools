@@ -93,84 +93,132 @@ export class WalletService {
     pnl: number;
     volume: number;
     tradeCount: number;
+    tradeCountDisplay?: string; // "> XXXX" 表示数据被截断
     winRate: number;
     smartScore: number;
   }> {
-    // 获取所有活动记录（分别抓取 TRADE 和 REDEEM 以确保数据深度）
-    const [trades, redemptions] = await Promise.all([
-      this.dataApi.getAllActivity(address, 10000, 'TRADE'),
-      this.dataApi.getAllActivity(address, 2000, 'REDEEM'),
-    ]);
+    // 30天前的时间戳（作为拉取数据的截止点）
+    const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    const PAGE_SIZE = 500;
+    const MAX_RECORDS = 100000; // 最大拉取上限
 
-    const allActivities = [...trades, ...redemptions].sort((a, b) => b.timestamp - a.timestamp);
+    // 分页拉取交易记录 (TRADE)
+    let allTrades: Activity[] = [];
+    let tradesTruncated = false;
+    let offset = 0;
+
+    while (true) {
+      const batch = await this.dataApi.getActivity(address, { limit: PAGE_SIZE, offset, type: 'TRADE' });
+      if (!batch || batch.length === 0) break;
+
+      allTrades.push(...batch);
+
+      // 检查是否已经拉取到30天之前的数据
+      const oldestInBatch = batch[batch.length - 1];
+      if (oldestInBatch && oldestInBatch.timestamp < thirtyDaysAgo) {
+        tradesTruncated = true;
+        break;
+      }
+
+      if (batch.length < PAGE_SIZE) break;
+
+      // 达到最大上限
+      if (allTrades.length >= MAX_RECORDS) {
+        tradesTruncated = true;
+        break;
+      }
+
+      offset += PAGE_SIZE;
+
+      // 防止请求过快
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    // 记录 trades 的最早时间戳，作为 redemptions 的截止点
+    const tradesOldestTimestamp = allTrades.length > 0
+      ? allTrades[allTrades.length - 1].timestamp
+      : thirtyDaysAgo;
+
+    // 分页拉取结算记录 (REDEEM) - 只回溯到与 trades 相同的日期
+    let allRedemptions: Activity[] = [];
+    let redemptionsTruncated = false;
+    offset = 0;
+
+    while (true) {
+      const batch = await this.dataApi.getActivity(address, { limit: PAGE_SIZE, offset, type: 'REDEEM' });
+      if (!batch || batch.length === 0) break;
+
+      allRedemptions.push(...batch);
+
+      const oldestInBatch = batch[batch.length - 1];
+      // 使用 trades 的最早时间戳作为截止点
+      if (oldestInBatch && oldestInBatch.timestamp < tradesOldestTimestamp) {
+        redemptionsTruncated = tradesTruncated; // 跟随 trades 的截断状态
+        break;
+      }
+
+      if (batch.length < PAGE_SIZE) break;
+
+      offset += PAGE_SIZE;
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    const isTruncated = tradesTruncated || redemptionsTruncated;
 
     // 按时间过滤
     const now = Date.now();
     const sinceTimestamp = periodDays > 0 ? now - periodDays * 24 * 60 * 60 * 1000 : 0;
-    const filteredTrades = trades.filter(a => a.timestamp >= sinceTimestamp);
-    const filteredRedemptions = redemptions.filter(a => a.timestamp >= sinceTimestamp);
+    const filteredTrades = allTrades.filter(a => a.timestamp >= sinceTimestamp);
+    const filteredRedemptions = allRedemptions.filter(a => a.timestamp >= sinceTimestamp);
 
     const buys = filteredTrades.filter(a => a.side === 'BUY');
     const sells = filteredTrades.filter(a => a.side === 'SELL');
 
     // === 计算交易量 ===
-    // 交易量 = 买入 + 卖出（不含 Redemption）
     const buyVolume = buys.reduce((sum, t) => sum + (t.usdcSize || t.size * t.price), 0);
     const sellVolume = sells.reduce((sum, t) => sum + (t.usdcSize || t.size * t.price), 0);
     const volume = buyVolume + sellVolume;
 
     // === 计算 PnL ===
-    // PnL = 卖出收入 + 交割收入 - 买入成本
-    // Redemption: 如果 outcome 方向正确，每个 share 价值 1 USDC
-    const redemptionValue = filteredRedemptions.reduce((sum, r) => {
-      // Redemption 时，size 代表赎回的 share 数量，每个价值 1 USDC
-      return sum + (r.size || 0);
-    }, 0);
-
+    const redemptionValue = filteredRedemptions.reduce((sum, r) => sum + (r.size || 0), 0);
     const realizedPnl = sellVolume + redemptionValue - buyVolume;
 
-    // === 获取当前持仓估值 (Mark-to-Market) ===
+    // === 获取当前持仓估值 ===
     let unrealizedPnl = 0;
     try {
       const positions = await this.dataApi.getPositions(address);
-      // 只计算在时间段内有活动的持仓的未实现盈亏
       unrealizedPnl = positions.reduce((sum, p) => sum + (p.cashPnl || 0), 0);
     } catch {
       // 持仓获取失败，只使用已实现盈亏
     }
 
-    // 总 PnL = 已实现 + 未实现
     const pnl = realizedPnl + unrealizedPnl;
 
     // === 计算胜率 ===
-    // 胜率 = (盈利的卖出交易 + 成功的交割) / (总卖出交易 + 总交割)
     let winCount = 0;
     let totalClosedPositions = sells.length + filteredRedemptions.length;
 
-    // 卖出盈利：卖出价 > 0.5（表示高于成本价）
     for (const sell of sells) {
       if (sell.price > 0.5) {
         winCount++;
       }
     }
-
-    // 交割都算作盈利（因为只有正确预测才会有 redemption value > 0）
     winCount += filteredRedemptions.filter(r => (r.size || 0) > 0).length;
 
     const winRate = totalClosedPositions > 0 ? winCount / totalClosedPositions : 0.5;
 
-    // === 计算评分 (基于该时间段的 ROI) ===
-    // Score = 基础分 50 + ROI 调整 + 交易活跃度调整
-    const roi = volume > 0 ? (pnl / volume) * 100 : 0; // ROI 百分比
-    const activityScore = Math.min(20, (filteredTrades.length / 10)); // 交易活跃度最多加 20 分
-    const roiScore = Math.min(30, Math.max(-30, roi * 3)); // ROI 最多影响 ±30 分
-
+    // === 计算评分 ===
+    const roi = volume > 0 ? (pnl / volume) * 100 : 0;
+    const activityScore = Math.min(20, (filteredTrades.length / 10));
+    const roiScore = Math.min(30, Math.max(-30, roi * 3));
     const smartScore = Math.round(Math.max(0, Math.min(100, 50 + roiScore + activityScore)));
 
     return {
       pnl,
       volume,
       tradeCount: filteredTrades.length,
+      // 如果数据被截断（因30天限制或5W上限），显示 "> XXXX"
+      tradeCountDisplay: isTruncated ? `> ${filteredTrades.length}` : undefined,
       winRate: Math.max(0, Math.min(1, winRate)),
       smartScore,
     };
