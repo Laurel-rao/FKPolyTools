@@ -33,29 +33,13 @@ export const arbitrageRoutes: FastifyPluginAsync = async (fastify) => {
             });
 
             const opportunities = [];
-            let scannedCount = 0;
-            let errorCount = 0;
-            let noArbCount = 0;
-
-            console.log(`[Arbitrage] Starting scan: ${markets.length} markets, minVolume=${minVolume}, minProfit=${minProfit}`);
 
             for (const market of markets) {
                 if (!market.conditionId) continue;
                 if ((market.volume24hr || 0) < minVolume) continue;
 
-                scannedCount++;
-
                 try {
                     const orderbook = await sdk.clobApi.getProcessedOrderbook(market.conditionId);
-
-                    // Debug: Log first 3 orderbooks to see data format
-                    if (scannedCount <= 3) {
-                        console.log(`[Arbitrage] Sample orderbook for "${market.question?.substring(0, 50)}...":`);
-                        console.log(`  YES: ask=${orderbook.yes.ask}, bid=${orderbook.yes.bid}`);
-                        console.log(`  NO:  ask=${orderbook.no.ask}, bid=${orderbook.no.bid}`);
-                        console.log(`  Sum(asks)=${(orderbook.yes.ask + orderbook.no.ask).toFixed(4)}`);
-                    }
-
                     const arb = checkArbitrage(
                         orderbook.yes.ask,
                         orderbook.no.ask,
@@ -82,16 +66,11 @@ export const arbitrageRoutes: FastifyPluginAsync = async (fastify) => {
                                 noBid: orderbook.no.bid,
                             },
                         });
-                    } else {
-                        noArbCount++;
                     }
                 } catch (error) {
-                    errorCount++;
                     // Skip markets where orderbook cannot be fetched
                 }
             }
-
-            console.log(`[Arbitrage] Scan complete: scanned=${scannedCount}, noArb=${noArbCount}, errors=${errorCount}, found=${opportunities.length}`);
 
             // 按利润排序
             opportunities.sort((a, b) => b.profit - a.profit);

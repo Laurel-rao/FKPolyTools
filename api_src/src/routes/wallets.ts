@@ -32,11 +32,11 @@ export const walletRoutes: FastifyPluginAsync = async (fastify) => {
             // 使用分页 API 获取更多数据（每页50条，自动翻页）
             const traders = await sdk.dataApi.getAllLeaderboard(Math.min(limit, 500), timePeriod);
 
-            // 异步将排行榜地址加入缓存队列（不阻塞响应）
-            const addresses = traders.map(t => t.address);
-            triggerWhaleCacheUpdate(addresses).catch(err =>
-                console.error('[Leaderboard] Failed to trigger cache update:', err)
-            );
+            // 已禁用后台 100k 交易数据拉取，直接使用 leaderboard 数据
+            // const addresses = traders.map(t => t.address);
+            // triggerWhaleCacheUpdate(addresses).catch(err =>
+            //     console.error('[Leaderboard] Failed to trigger cache update:', err)
+            // );
 
             return traders;
         },

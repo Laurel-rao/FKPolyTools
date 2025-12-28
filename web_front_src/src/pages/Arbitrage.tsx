@@ -38,7 +38,7 @@ function Arbitrage() {
             setLoading(true);
             setError(null);
             // Debug mode: minVolume $100, minProfit 0%
-            const res = await arbitrageApi.scan(100, 50, 0);
+            const res = await arbitrageApi.scan(100, 500, 0);
             setOpportunities(res.data.opportunities || []);
             setScannedAt(res.data.scannedAt);
         } catch (err) {
